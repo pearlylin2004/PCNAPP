@@ -122,6 +122,72 @@ ul, ol { list-style: none; margin: 0; padding: 0; }
 #itinerary summary { color: #1565c0; font-size: 13px; }
 #itinerary details ol { margin-top: 4px; padding-left: 18px; list-style: decimal; color: #3b4a40; font-size: 13px; }
 
+/* Toilets and water points */
+.toggles { display: flex; gap: 16px; font-size: 14px; }
+.toggles label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+.amenity-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .35);
+  font-size: 13px;
+}
+.amenity-icon.on-route { box-shadow: 0 0 0 3px #1b5e20; font-size: 15px; }
+
+#stops[hidden] { display: none; }
+#stops { display: flex; flex-direction: column; gap: 6px; }
+#stops-list li {
+  display: flex;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+}
+#stops-list li:hover { background: #f1f5f0; }
+#stops-list small { display: block; color: #5b6b60; }
+#stops-list .at { margin-left: auto; color: #1b5e20; font-weight: 600; white-space: nowrap; }
+
+/* Saved places */
+#saved-count:empty { display: none; }
+#saved-count {
+  padding: 0 6px;
+  border-radius: 9px;
+  background: #e3ece2;
+  font-size: 12px;
+}
+#saved-list li { display: flex; align-items: center; gap: 4px; padding: 4px 0; border-bottom: 1px solid #eef1ed; }
+#saved-list li.empty { color: #8a978e; font-size: 14px; border: 0; }
+.saved-name {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 4px;
+  border: 0;
+  background: none;
+  text-align: left;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.saved-name:hover { text-decoration: underline; }
+.small-btn, .pin-btn {
+  padding: 4px 8px;
+  border: 1px solid #c9d2c8;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 12px;
+}
+.small-btn:hover, .pin-btn:hover { background: #eef3ec; }
+.pin-btn { filter: grayscale(1); opacity: .45; }
+.pin-btn.on { filter: none; opacity: 1; background: #fff4e5; border-color: #f0b46b; }
+
+.pin-icon { font-size: 22px; line-height: 1; text-shadow: 0 1px 2px rgba(0, 0, 0, .4); }
+.pin-label { font-weight: 600; }
+
 /* Explore tab */
 #results { max-height: 220px; overflow-y: auto; }
 #results li, #loops li {

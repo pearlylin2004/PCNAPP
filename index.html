@@ -16,6 +16,7 @@
 
     <nav class="tabs">
       <button data-tab="directions" class="active">Directions</button>
+      <button data-tab="saved">Saved <span id="saved-count"></span></button>
       <button data-tab="explore">Explore</button>
     </nav>
 
@@ -46,11 +47,25 @@
         </select>
       </div>
 
+      <div class="toggles">
+        <label><input type="checkbox" id="show-toilet" checked> 🚻 Toilets</label>
+        <label><input type="checkbox" id="show-water" checked> 💧 Water points</label>
+      </div>
+
       <p class="hint">Tip: click anywhere on the map to start or end there.</p>
       <p id="route-status" class="hint"></p>
       <div id="summary"></div>
       <ol id="itinerary"></ol>
+      <section id="stops" hidden>
+        <h2>Along the way</h2>
+        <ul id="stops-list"></ul>
+      </section>
       <button id="clear-route" class="link-btn" hidden>Clear route</button>
+    </section>
+
+    <section id="tab-saved" class="tab" hidden>
+      <p class="hint">Tap any spot, toilet or water point on the map and choose ⭐ Save. 📌 Pinned places always show on the map. Saved places are kept in this browser.</p>
+      <ul id="saved-list"></ul>
     </section>
 
     <section id="tab-explore" class="tab" hidden>
@@ -66,7 +81,7 @@
 
     <footer>
       Path data: NParks via <a href="https://data.gov.sg/collections/1488/view" target="_blank" rel="noopener">data.gov.sg</a> (indicative).
-      Search: OneMap. Road directions: <a href="https://routing.openstreetmap.de/" target="_blank" rel="noopener">FOSSGIS</a>, &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors.
+      Toilets &amp; water: NParks and OpenStreetMap. Search: OneMap. Road directions: <a href="https://routing.openstreetmap.de/" target="_blank" rel="noopener">FOSSGIS</a>, &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors.
     </footer>
   </aside>
 
@@ -75,6 +90,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <script src="data/tracks.js"></script>
   <script src="data/pcn.js"></script>
+  <script src="data/amenities.js"></script>
   <script src="graph.js"></script>
   <script src="app.js"></script>
 </body>

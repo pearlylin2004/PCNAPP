@@ -102,6 +102,147 @@ L.geoJSON(window.PCN_DATA, {
   },
 });
 
+// ---------- Toilets and water points ----------
+
+const AMENITY_TYPES = {
+  toilet: { icon: '🚻', label: 'Toilet' },
+  water: { icon: '💧', label: 'Water point' },
+};
+const AMENITY_MIN_ZOOM = 14; // hidden when zoomed further out, or the map gets crowded
+const NEAR_ROUTE = 150;      // m: how far off the route a stop can be and still be listed
+const STOP_SPACING = 500;    // m: skip stops of the same type closer than this along the route
+
+const amenityIcon = (type, onRoute) => L.divIcon({
+  className: `amenity-icon${onRoute ? ' on-route' : ''}`,
+  html: AMENITY_TYPES[type].icon,
+  iconSize: onRoute ? [28, 28] : [22, 22],
+});
+const amenityName = (a) => a.name || AMENITY_TYPES[a.type].label;
+const amenityDetails = (a) => [a.info, `Source: ${a.src}`].filter(Boolean).join(' · ');
+const showAmenity = (type) => $(`show-${type}`).checked;
+
+function openAmenity(a) {
+  openPointPopup(L.latLng(a.lat, a.lng), amenityName(a), amenityDetails(a));
+}
+
+const amenityGroups = { toilet: L.layerGroup(), water: L.layerGroup() };
+for (const a of window.AMENITIES) {
+  L.marker([a.lat, a.lng], { icon: amenityIcon(a.type), title: AMENITY_TYPES[a.type].label, keyboard: false })
+    .on('click', () => openAmenity(a))
+    .addTo(amenityGroups[a.type]);
+}
+
+function updateAmenities() {
+  for (const [type, group] of Object.entries(amenityGroups)) {
+    const visible = showAmenity(type) && map.getZoom() >= AMENITY_MIN_ZOOM;
+    if (visible && !map.hasLayer(group)) map.addLayer(group);
+    if (!visible && map.hasLayer(group)) map.removeLayer(group);
+  }
+}
+map.on('zoomend', updateAmenities);
+updateAmenities();
+
+// ---------- Saved and pinned places ----------
+// Kept in this browser's localStorage, so they survive closing the page but stay on this device.
+
+const SAVED_KEY = 'pcnFinder.savedPlaces';
+const SAME_PLACE = 15; // m: a spot this close to a saved place counts as already saved
+
+let savedPlaces = loadSaved(); // [{ id, name, latlng: [lat, lng], pinned }]
+
+function loadSaved() {
+  try {
+    const list = JSON.parse(localStorage.getItem(SAVED_KEY));
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function storeSaved() {
+  try {
+    localStorage.setItem(SAVED_KEY, JSON.stringify(savedPlaces));
+  } catch {
+    // Storage blocked (e.g. private browsing): places still work until the page is closed.
+  }
+}
+
+const sortedSaved = () => [...savedPlaces].sort((a, b) => (b.pinned - a.pinned) || a.name.localeCompare(b.name));
+const findSaved = (latlng) => savedPlaces.find((p) => PCNGraph.distance(toLngLat(p.latlng), toLngLat(latlng)) < SAME_PLACE);
+
+function savePlace(suggestedName, latlng) {
+  const name = prompt('Name this place', suggestedName.startsWith('Pin at') ? '' : suggestedName);
+  if (!name || !name.trim()) return;
+  savedPlaces.push({ id: Date.now().toString(36), name: name.trim(), latlng, pinned: false });
+  updateSaved();
+}
+
+function updateSaved() {
+  storeSaved();
+  renderSaved();
+  drawPins();
+}
+
+const pinLayer = L.layerGroup().addTo(map);
+function drawPins() {
+  pinLayer.clearLayers();
+  for (const p of savedPlaces.filter((s) => s.pinned)) {
+    L.marker(p.latlng, {
+      icon: L.divIcon({ className: 'pin-icon', html: '📌', iconSize: [24, 24], iconAnchor: [6, 22] }),
+      title: p.name,
+      zIndexOffset: 500,
+    })
+      .bindTooltip(p.name, { permanent: true, direction: 'top', offset: [6, -20], className: 'pin-label' })
+      .on('click', () => openPointPopup(L.latLng(p.latlng), p.name, 'Pinned place'))
+      .addTo(pinLayer);
+  }
+}
+
+function renderSaved() {
+  const list = $('saved-list');
+  list.innerHTML = '';
+  $('saved-count').textContent = savedPlaces.length || '';
+  if (!savedPlaces.length) {
+    list.appendChild(el('li', 'empty', 'No saved places yet.'));
+    return;
+  }
+  for (const p of sortedSaved()) {
+    const li = el('li');
+    const button = (className, text, title, onclick) => {
+      const b = el('button', className, text);
+      b.title = title;
+      b.onclick = onclick;
+      li.appendChild(b);
+    };
+    button(`pin-btn${p.pinned ? ' on' : ''}`, '📌', p.pinned ? 'Unpin from the map' : 'Pin on the map', () => {
+      p.pinned = !p.pinned;
+      updateSaved();
+    });
+    button('saved-name', p.name, 'Show on the map', () => {
+      map.setView(p.latlng, Math.max(map.getZoom(), 16));
+      openPointPopup(L.latLng(p.latlng), p.name, p.pinned ? 'Pinned place' : 'Saved place');
+    });
+    button('small-btn', 'From', 'Start from here', () => setPlace('from', { label: p.name, latlng: p.latlng }));
+    button('small-btn', 'To', 'Go here', () => setPlace('to', { label: p.name, latlng: p.latlng }));
+    button('small-btn', '✏️', 'Rename', () => {
+      const name = prompt('Rename this place', p.name);
+      if (name && name.trim()) {
+        p.name = name.trim();
+        updateSaved();
+      }
+    });
+    button('small-btn', '✕', 'Delete', () => {
+      if (!confirm(`Delete "${p.name}"?`)) return;
+      savedPlaces = savedPlaces.filter((s) => s !== p);
+      updateSaved();
+    });
+    list.appendChild(li);
+  }
+}
+
+renderSaved();
+drawPins();
+
 // ---------- Choosing start and destination ----------
 
 const places = { from: null, to: null }; // { label, latlng: [lat, lng] }
@@ -115,7 +256,7 @@ function setPlace(which, place) {
   if (placeMarkers[which]) placeMarkers[which].remove();
   placeMarkers[which] = place && L.circleMarker(place.latlng, {
     radius: 9, color: '#fff', weight: 3, fillColor: MARKER_COLOURS[which], fillOpacity: 1,
-  }).addTo(map).bindTooltip(place.label);
+  }).addTo(map).bindTooltip(place.label).on('click', () => openPointPopup(L.latLng(place.latlng), place.label));
   if (places.from && places.to) planRoute();
   else if (place) map.panTo(place.latlng);
 }
@@ -139,6 +280,14 @@ function openPointPopup(latlng, name, sub) {
     };
     btns.appendChild(b);
   }
+  const saved = findSaved([latlng.lat, latlng.lng]);
+  const save = el('button', null, saved ? '★ Saved' : '⭐ Save');
+  save.disabled = Boolean(saved);
+  save.onclick = () => {
+    map.closePopup();
+    savePlace(name || '', [latlng.lat, latlng.lng]);
+  };
+  btns.appendChild(save);
   box.appendChild(btns);
   L.popup().setLatLng(latlng).setContent(box).openOn(map);
 }
@@ -163,24 +312,39 @@ async function searchPlaces(query) {
 function setupPlaceInput(which) {
   const input = $(which), list = $(`${which}-list`);
   let timer, latest = 0;
+
+  // Saved places matching the text come first, before OneMap results.
+  const savedMatches = (q) => sortedSaved()
+    .filter((p) => p.name.toLowerCase().includes(q.toLowerCase()))
+    .map((p) => ({ label: p.name, detail: p.pinned ? 'Pinned place' : 'Saved place', latlng: p.latlng, saved: true }));
+
+  const show = (results) => {
+    list.innerHTML = '';
+    for (const place of results) {
+      const li = el('li', null, `${place.saved ? '⭐ ' : ''}${place.label}`);
+      if (place.detail) li.appendChild(el('small', null, place.detail));
+      li.onmousedown = (e) => e.preventDefault(); // keep focus so the blur handler doesn't hide the list first
+      li.onclick = () => setPlace(which, place);
+      list.appendChild(li);
+    }
+  };
+
+  input.addEventListener('focus', () => { if (!input.value.trim()) show(savedMatches('')); });
+  input.addEventListener('blur', () => { list.innerHTML = ''; });
   input.addEventListener('input', () => {
     places[which] = null;
     clearTimeout(timer);
     const q = input.value.trim();
-    if (q.length < 2) { list.innerHTML = ''; return; }
+    const mine = savedMatches(q);
+    show(mine);
+    if (q.length < 2) return;
     timer = setTimeout(async () => {
       const request = ++latest;
       let results;
       try { results = await searchPlaces(q); } catch { results = []; }
       if (request !== latest) return; // a newer search has started
-      list.innerHTML = '';
-      if (!results.length) list.appendChild(el('li', null, 'No places found'));
-      for (const place of results) {
-        const li = el('li', null, place.label);
-        if (place.detail) li.appendChild(el('small', null, place.detail));
-        li.onclick = () => setPlace(which, place);
-        list.appendChild(li);
-      }
+      show(mine.concat(results));
+      if (!list.children.length) list.appendChild(el('li', null, 'No places found'));
     }, 300);
   });
 }
@@ -261,7 +425,9 @@ async function fillRoadLeg(leg, mode) {
 // ---------- Planning and drawing the route ----------
 
 const routeLayer = L.layerGroup().addTo(map);
+const stopLayer = L.layerGroup().addTo(map);
 let planCount = 0;
+let currentLegs = null;
 
 async function planRoute() {
   const { from, to } = places;
@@ -271,6 +437,7 @@ async function planRoute() {
   $('route-status').textContent = 'Working out the best route…';
   $('summary').innerHTML = '';
   $('itinerary').innerHTML = '';
+  $('stops').hidden = true;
 
   await new Promise((r) => setTimeout(r, 20)); // let the status message show before the heavy work
   const legs = PCNGraph.route(toLngLat(from.latlng), toLngLat(to.latlng), Number($('pref').value), mode);
@@ -282,8 +449,55 @@ async function planRoute() {
     : '';
   drawRoute(legs);
   renderItinerary(legs, mode);
+  currentLegs = legs;
+  renderStops(legs);
   $('clear-route').hidden = false;
 }
+
+// Toilets and water points near the route, in the order you reach them.
+function renderStops(legs) {
+  stopLayer.clearLayers();
+  const list = $('stops-list');
+  list.innerHTML = '';
+
+  const line = legs.flatMap((l) => l.coords);
+  const bounds = L.latLngBounds(toLatLngs(line)).pad(0.05);
+  const lastAt = {};
+  const stops = window.AMENITIES
+    .filter((a) => showAmenity(a.type) && bounds.contains([a.lat, a.lng]))
+    .map((a) => ({ a, ...PCNGraph.locateAlong(line, [a.lng, a.lat]) }))
+    .filter((s) => s.d <= NEAR_ROUTE)
+    .sort((x, y) => x.at - y.at)
+    .filter((s) => {
+      if (s.at - (lastAt[s.a.type] ?? -Infinity) < STOP_SPACING) return false;
+      lastAt[s.a.type] = s.at;
+      return true;
+    });
+
+  if (!stops.length && (showAmenity('toilet') || showAmenity('water'))) {
+    list.appendChild(el('li', null, `None within ${NEAR_ROUTE} m of this route.`));
+  }
+  for (const { a, d, at } of stops) {
+    const li = el('li');
+    const text = el('div', null, amenityName(a));
+    text.appendChild(el('small', null, d < 20 ? 'On the route' : `${formatDistance(d)} off the route`));
+    li.append(el('span', null, AMENITY_TYPES[a.type].icon), text, el('span', 'at', `at ${formatDistance(at)}`));
+    li.onclick = () => {
+      map.setView([a.lat, a.lng], 17);
+      openAmenity(a);
+    };
+    list.appendChild(li);
+    L.marker([a.lat, a.lng], { icon: amenityIcon(a.type, true), title: AMENITY_TYPES[a.type].label, zIndexOffset: 1000 })
+      .on('click', () => openAmenity(a))
+      .addTo(stopLayer);
+  }
+  $('stops').hidden = !list.children.length;
+}
+
+$('show-toilet').onchange = $('show-water').onchange = () => {
+  updateAmenities();
+  if (currentLegs) renderStops(currentLegs);
+};
 
 function drawRoute(legs) {
   routeLayer.clearLayers();
@@ -357,7 +571,10 @@ function renderItinerary(legs, mode) {
 
 $('clear-route').onclick = () => {
   planCount++;
+  currentLegs = null;
   routeLayer.clearLayers();
+  stopLayer.clearLayers();
+  $('stops').hidden = true;
   setNetworkFaded(false);
   setPlace('from', null);
   setPlace('to', null);

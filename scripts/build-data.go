@@ -1,12 +1,13 @@
-// Downloads NParks path data from data.gov.sg and writes compact copies for the website:
+// Downloads NParks and OpenStreetMap data and writes compact copies for the website:
 //
-//	data/tracks.js  every NParks path (park connectors + paths inside parks), used for routing
-//	data/pcn.js     the named PCN loops, used for the Explore tab
+//	data/tracks.js     every NParks path (park connectors + paths inside parks), used for routing
+//	data/pcn.js        the named PCN loops, used for the Explore tab
+//	data/amenities.js  toilets and drinking water (NParks park facilities + OpenStreetMap)
 //
 // Usage (from the project folder):
 //
 //	go run scripts/build-data.go
-//	go run scripts/build-data.go -tracks tracks.geojson -loops loops.geojson   (use downloaded files)
+//	go run scripts/build-data.go -tracks t.geojson -loops l.geojson -facilities f.geojson -osm o.json   (use downloaded files)
 package main
 
 import (
@@ -16,6 +17,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,10 +26,16 @@ import (
 )
 
 const (
-	tracksID = "d_306cc1018cb733346681883ee6d73054" // NParks Tracks
-	loopsID  = "d_a69ef89737379f231d2ae93fd1c5707f" // Park Connector Loop
+	tracksID     = "d_306cc1018cb733346681883ee6d73054" // NParks Tracks
+	loopsID      = "d_a69ef89737379f231d2ae93fd1c5707f" // Park Connector Loop
+	facilitiesID = "d_14d807e20158338fd578c2913953516e" // NParks Park Facilities
 
 	simplifyMetres = 1.5 // drop points that change a line's shape by less than this
+	dedupeMetres   = 30  // an OpenStreetMap amenity this close to an NParks one of the same type is a duplicate
+
+	overpassURL   = "https://overpass-api.de/api/interpreter"
+	overpassQuery = `[out:json][timeout:90];area["ISO3166-1"="SG"]->.sg;
+(nwr["amenity"="toilets"](area.sg);nwr["amenity"="drinking_water"](area.sg););out center tags;`
 )
 
 type feature struct {
@@ -58,10 +66,14 @@ type point = [2]float64
 func main() {
 	tracksFile := flag.String("tracks", "", "read NParks Tracks from this GeoJSON file instead of downloading")
 	loopsFile := flag.String("loops", "", "read Park Connector Loop from this GeoJSON file instead of downloading")
+	facilitiesFile := flag.String("facilities", "", "read NParks Park Facilities from this GeoJSON file instead of downloading")
+	osmFile := flag.String("osm", "", "read the OpenStreetMap Overpass result from this JSON file instead of downloading")
 	flag.Parse()
 
 	tracks := must(load(tracksID, *tracksFile))
 	loops := must(load(loopsID, *loopsFile))
+	facilities := must(load(facilitiesID, *facilitiesFile))
+	osm := must(loadOSM(*osmFile))
 
 	var trackOut []outFeature
 	for _, f := range tracks.Features {
@@ -88,10 +100,132 @@ func main() {
 		}
 	}
 
+	stops := amenities(facilities, osm)
+
 	today := time.Now().Format("2006-01-02")
-	write("data/tracks.js", "TRACKS_DATA", trackOut, fmt.Sprintf("NParks Tracks, data.gov.sg (%s). Downloaded %s.", tracksID, today))
-	write("data/pcn.js", "PCN_DATA", loopOut, fmt.Sprintf("NParks Park Connector Loop, data.gov.sg (%s). Downloaded %s.", loopsID, today))
+	write("data/tracks.js", "TRACKS_DATA", featureCollection(trackOut), len(trackOut),
+		fmt.Sprintf("NParks Tracks, data.gov.sg (%s). Downloaded %s.", tracksID, today))
+	write("data/pcn.js", "PCN_DATA", featureCollection(loopOut), len(loopOut),
+		fmt.Sprintf("NParks Park Connector Loop, data.gov.sg (%s). Downloaded %s.", loopsID, today))
+	write("data/amenities.js", "AMENITIES", stops, len(stops),
+		fmt.Sprintf("NParks Park Facilities, data.gov.sg (%s), and OpenStreetMap contributors (ODbL). Downloaded %s.", facilitiesID, today))
 }
+
+func featureCollection(features []outFeature) map[string]any {
+	return map[string]any{"type": "FeatureCollection", "features": features}
+}
+
+type amenity struct {
+	Type   string  `json:"type"` // "toilet" or "water"
+	Lat    float64 `json:"lat"`
+	Lng    float64 `json:"lng"`
+	Name   string  `json:"name,omitempty"`
+	Info   string  `json:"info,omitempty"`
+	Source string  `json:"src"`
+}
+
+type osmResult struct {
+	Elements []struct {
+		Lat    float64 `json:"lat"`
+		Lon    float64 `json:"lon"`
+		Center *struct {
+			Lat float64 `json:"lat"`
+			Lon float64 `json:"lon"`
+		} `json:"center"`
+		Tags map[string]string `json:"tags"`
+	} `json:"elements"`
+}
+
+// loadOSM reads toilets and drinking water from a file, or asks the Overpass API.
+func loadOSM(file string) (osmResult, error) {
+	var r osmResult
+	if file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return r, err
+		}
+		return r, json.Unmarshal(data, &r)
+	}
+	fmt.Println("Downloading toilets and drinking water from OpenStreetMap ...")
+	res, err := http.PostForm(overpassURL, url.Values{"data": {overpassQuery}})
+	if err != nil {
+		return r, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return r, fmt.Errorf("overpass: %s", res.Status)
+	}
+	return r, json.NewDecoder(res.Body).Decode(&r)
+}
+
+// amenities combines NParks park facilities with OpenStreetMap, dropping duplicates.
+func amenities(facilities collection, osm osmResult) []amenity {
+	var out []amenity
+	for _, f := range facilities.Features {
+		var t string
+		switch str(f.Properties["CLASS"]) {
+		case "TOILET":
+			t = "toilet"
+		case "DRINKING FOUNTAIN":
+			t = "water"
+		default:
+			continue
+		}
+		var pt point
+		if f.Geometry.Type != "Point" || json.Unmarshal(f.Geometry.Coordinates, &pt) != nil {
+			continue
+		}
+		name := cleanName(str(f.Properties["NAME"]))
+		if strings.EqualFold(name, "Toilet") || strings.EqualFold(name, "Drinking Fountain") {
+			name = ""
+		}
+		out = append(out, amenity{t, round5(pt[1]), round5(pt[0]), name, str(f.Properties["ADDITIONAL_INFO"]), "NParks"})
+	}
+	nparksCount := len(out)
+
+	for _, e := range osm.Elements {
+		tags := e.Tags
+		if tags["access"] == "private" || tags["access"] == "no" {
+			continue
+		}
+		t := map[string]string{"toilets": "toilet", "drinking_water": "water"}[tags["amenity"]]
+		lat, lng := e.Lat, e.Lon
+		if e.Center != nil {
+			lat, lng = e.Center.Lat, e.Center.Lon
+		}
+		if t == "" || lat == 0 || nearSameType(out[:nparksCount], t, lat, lng) {
+			continue
+		}
+		var info []string
+		if tags["fee"] == "yes" {
+			info = append(info, "Paid")
+		}
+		if tags["access"] == "customers" {
+			info = append(info, "For customers")
+		}
+		if tags["wheelchair"] == "yes" {
+			info = append(info, "Wheelchair accessible")
+		}
+		if h := tags["opening_hours"]; h != "" {
+			info = append(info, "Open "+h)
+		}
+		out = append(out, amenity{t, round5(lat), round5(lng), tags["name"], strings.Join(info, " · "), "OpenStreetMap"})
+	}
+	return out
+}
+
+func nearSameType(list []amenity, t string, lat, lng float64) bool {
+	px, py := toMetres(point{lng, lat})
+	for _, a := range list {
+		ax, ay := toMetres(point{a.Lng, a.Lat})
+		if a.Type == t && math.Hypot(px-ax, py-ay) < dedupeMetres {
+			return true
+		}
+	}
+	return false
+}
+
+func round5(v float64) float64 { return math.Round(v*1e5) / 1e5 }
 
 func must[T any](v T, err error) T {
 	if err != nil {
@@ -164,7 +298,7 @@ func lineFeature(line []point, props map[string]any) outFeature {
 	coords := make([][2]float64, len(line))
 	for i, p := range line {
 		// 5 decimal places is about 1 m, plenty for a path.
-		coords[i] = [2]float64{math.Round(p[0]*1e5) / 1e5, math.Round(p[1]*1e5) / 1e5}
+		coords[i] = [2]float64{round5(p[0]), round5(p[1])}
 	}
 	return outFeature{"Feature", outGeometry{"LineString", coords}, props}
 }
@@ -261,10 +395,10 @@ func str(v any) string {
 	return s
 }
 
-func write(path, varName string, features []outFeature, source string) {
-	data := must(json.Marshal(map[string]any{"type": "FeatureCollection", "features": features}))
+func write(path, varName string, value any, count int, source string) {
+	data := must(json.Marshal(value))
 	must(0, os.MkdirAll(filepath.Dir(path), 0o755))
 	js := fmt.Sprintf("// Source: %s\nwindow.%s = %s;\n", source, varName, data)
 	must(0, os.WriteFile(path, []byte(js), 0o644))
-	fmt.Printf("Wrote %s (%d paths, %.1f MB)\n", path, len(features), float64(len(js))/1e6)
+	fmt.Printf("Wrote %s (%d items, %.1f MB)\n", path, count, float64(len(js))/1e6)
 }

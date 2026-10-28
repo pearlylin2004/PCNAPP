@@ -296,6 +296,23 @@ const PCNGraph = (() => {
     return toLegs(steps.reverse());
   }
 
+  // How far `pt` is from `line` (a list of [lng, lat]), and how far along the line
+  // its closest point is: { d, at } in metres.
+  function locateAlong(line, pt) {
+    let best = { d: Infinity, at: 0 }, travelled = 0;
+    for (let i = 1; i < line.length; i++) {
+      // Work in metres relative to `pt`.
+      const ax = (line[i - 1][0] - pt[0]) * M_PER_DEG_LNG, ay = (line[i - 1][1] - pt[1]) * M_PER_DEG_LAT;
+      const bx = (line[i][0] - pt[0]) * M_PER_DEG_LNG, by = (line[i][1] - pt[1]) * M_PER_DEG_LAT;
+      const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy);
+      const t = len ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / (len * len))) : 0;
+      const d = Math.hypot(ax + t * dx, ay + t * dy);
+      if (d < best.d) best = { d, at: travelled + t * len };
+      travelled += len;
+    }
+    return best;
+  }
+
   // Closest park connector point to `pt`: { pt, d, name }.
   function nearestPCN(pt) {
     if (!built) build(window.TRACKS_DATA);
@@ -303,5 +320,5 @@ const PCNGraph = (() => {
     return { pt: nodes[id].pt, d, name: nodes[id].name };
   }
 
-  return { route, nearestPCN, distance };
+  return { route, nearestPCN, distance, locateAlong };
 })();
