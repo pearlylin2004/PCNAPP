@@ -3,11 +3,13 @@
 //	data/tracks.js     every NParks path (park connectors + paths inside parks), used for routing
 //	data/pcn.js        the named PCN loops, used for the Explore tab
 //	data/amenities.js  toilets and drinking water (NParks park facilities + OpenStreetMap)
+//	data/signals.js    traffic lights (OpenStreetMap), for estimating waiting time
 //
 // Usage (from the project folder):
 //
 //	go run scripts/build-data.go
-//	go run scripts/build-data.go -tracks t.geojson -loops l.geojson -facilities f.geojson -osm o.json   (use downloaded files)
+//	go run scripts/build-data.go -tracks t.geojson -loops l.geojson -facilities f.geojson \
+//	    -osm o.json -signals s.json   (use downloaded files)
 package main
 
 import (
@@ -32,11 +34,20 @@ const (
 
 	simplifyMetres = 1.5 // drop points that change a line's shape by less than this
 	dedupeMetres   = 30  // an OpenStreetMap amenity this close to an NParks one of the same type is a duplicate
+	junctionMetres = 30  // traffic signal points this close together are one junction (one wait)
 
-	overpassURL   = "https://overpass-api.de/api/interpreter"
-	overpassQuery = `[out:json][timeout:90];area["ISO3166-1"="SG"]->.sg;
+	amenitiesQuery = `[out:json][timeout:90];area["ISO3166-1"="SG"]->.sg;
 (nwr["amenity"="toilets"](area.sg);nwr["amenity"="drinking_water"](area.sg););out center tags;`
+	signalsQuery = `[out:json][timeout:90];area["ISO3166-1"="SG"]->.sg;
+(node["highway"="traffic_signals"](area.sg);node["crossing"="traffic_signals"](area.sg););out skel;`
 )
+
+// Public Overpass servers are often busy, so try each in turn.
+var overpassServers = []string{
+	"https://overpass-api.de/api/interpreter",
+	"https://overpass.kumi.systems/api/interpreter",
+	"https://overpass.private.coffee/api/interpreter",
+}
 
 type feature struct {
 	Geometry struct {
@@ -67,13 +78,15 @@ func main() {
 	tracksFile := flag.String("tracks", "", "read NParks Tracks from this GeoJSON file instead of downloading")
 	loopsFile := flag.String("loops", "", "read Park Connector Loop from this GeoJSON file instead of downloading")
 	facilitiesFile := flag.String("facilities", "", "read NParks Park Facilities from this GeoJSON file instead of downloading")
-	osmFile := flag.String("osm", "", "read the OpenStreetMap Overpass result from this JSON file instead of downloading")
+	osmFile := flag.String("osm", "", "read OpenStreetMap toilets and drinking water from this Overpass JSON file instead of downloading")
+	signalsFile := flag.String("signals", "", "read OpenStreetMap traffic signals from this Overpass JSON file instead of downloading")
 	flag.Parse()
 
 	tracks := must(load(tracksID, *tracksFile))
 	loops := must(load(loopsID, *loopsFile))
 	facilities := must(load(facilitiesID, *facilitiesFile))
-	osm := must(loadOSM(*osmFile))
+	osm := must(loadOSM("toilets and drinking water", amenitiesQuery, *osmFile))
+	signals := must(loadOSM("traffic signals", signalsQuery, *signalsFile))
 
 	var trackOut []outFeature
 	for _, f := range tracks.Features {
@@ -101,6 +114,7 @@ func main() {
 	}
 
 	stops := amenities(facilities, osm)
+	junctions := junctions(signals)
 
 	today := time.Now().Format("2006-01-02")
 	write("data/tracks.js", "TRACKS_DATA", featureCollection(trackOut), len(trackOut),
@@ -109,6 +123,8 @@ func main() {
 		fmt.Sprintf("NParks Park Connector Loop, data.gov.sg (%s). Downloaded %s.", loopsID, today))
 	write("data/amenities.js", "AMENITIES", stops, len(stops),
 		fmt.Sprintf("NParks Park Facilities, data.gov.sg (%s), and OpenStreetMap contributors (ODbL). Downloaded %s.", facilitiesID, today))
+	write("data/signals.js", "SIGNALS", junctions, len(junctions),
+		fmt.Sprintf("Traffic signals as [lat, lng], OpenStreetMap contributors (ODbL). Downloaded %s.", today))
 }
 
 func featureCollection(features []outFeature) map[string]any {
@@ -136,8 +152,8 @@ type osmResult struct {
 	} `json:"elements"`
 }
 
-// loadOSM reads toilets and drinking water from a file, or asks the Overpass API.
-func loadOSM(file string) (osmResult, error) {
+// loadOSM reads an Overpass result from a file, or runs `query` on the Overpass API.
+func loadOSM(what, query, file string) (osmResult, error) {
 	var r osmResult
 	if file != "" {
 		data, err := os.ReadFile(file)
@@ -146,16 +162,56 @@ func loadOSM(file string) (osmResult, error) {
 		}
 		return r, json.Unmarshal(data, &r)
 	}
-	fmt.Println("Downloading toilets and drinking water from OpenStreetMap ...")
-	res, err := http.PostForm(overpassURL, url.Values{"data": {overpassQuery}})
-	if err != nil {
-		return r, err
+	fmt.Printf("Downloading %s from OpenStreetMap ...\n", what)
+	var lastErr error
+	for _, server := range overpassServers {
+		res, err := http.PostForm(server, url.Values{"data": {query}})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		err = func() error {
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusOK {
+				return fmt.Errorf("%s: %s", server, res.Status)
+			}
+			return json.NewDecoder(res.Body).Decode(&r)
+		}()
+		if err == nil {
+			return r, nil
+		}
+		lastErr = err
 	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return r, fmt.Errorf("overpass: %s", res.Status)
+	return r, lastErr
+}
+
+// junctions merges traffic signal points that belong to the same junction, as [lat, lng] pairs.
+func junctions(signals osmResult) [][2]float64 {
+	const cell = 0.001 // grid cell in degrees (~110 m) for finding nearby points quickly
+	grid := map[[2]int][]point{}
+	var out [][2]float64
+	for _, e := range signals.Elements {
+		p := point{e.Lon, e.Lat}
+		cx, cy := int(math.Floor(p[0]/cell)), int(math.Floor(p[1]/cell))
+		taken := false
+		for dx := -1; dx <= 1 && !taken; dx++ {
+			for dy := -1; dy <= 1 && !taken; dy++ {
+				for _, q := range grid[[2]int{cx + dx, cy + dy}] {
+					px, py := toMetres(p)
+					qx, qy := toMetres(q)
+					if math.Hypot(px-qx, py-qy) < junctionMetres {
+						taken = true
+						break
+					}
+				}
+			}
+		}
+		if !taken {
+			grid[[2]int{cx, cy}] = append(grid[[2]int{cx, cy}], p)
+			out = append(out, [2]float64{round5(e.Lat), round5(e.Lon)})
+		}
 	}
-	return r, json.NewDecoder(res.Body).Decode(&r)
+	return out
 }
 
 // amenities combines NParks park facilities with OpenStreetMap, dropping duplicates.

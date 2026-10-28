@@ -38,6 +38,7 @@
       <div class="options">
         <select id="mode" title="How you're travelling">
           <option value="bike">🚲 Cycling</option>
+          <option value="run">🏃 Running</option>
           <option value="foot">🚶 Walking</option>
         </select>
         <select id="pref" title="How much to prefer the PCN over roads">
@@ -46,6 +47,12 @@
           <option value="5">Stay on PCN</option>
         </select>
       </div>
+
+      <div class="timing">
+        <label id="pace-field" hidden>Pace <input id="pace" type="text" inputmode="decimal" size="5"> /km</label>
+        <label>🚦 Wait per light <input id="light-wait" type="number" min="0" max="300" step="5"> s</label>
+      </div>
+      <p id="timing-error" class="hint error"></p>
 
       <div class="toggles">
         <label><input type="checkbox" id="show-toilet" checked> 🚻 Toilets</label>
@@ -81,7 +88,7 @@
 
     <footer>
       Path data: NParks via <a href="https://data.gov.sg/collections/1488/view" target="_blank" rel="noopener">data.gov.sg</a> (indicative).
-      Toilets &amp; water: NParks and OpenStreetMap. Search: OneMap. Road directions: <a href="https://routing.openstreetmap.de/" target="_blank" rel="noopener">FOSSGIS</a>, &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors.
+      Toilets, water &amp; traffic lights: NParks and OpenStreetMap. Search: OneMap. Road directions: <a href="https://routing.openstreetmap.de/" target="_blank" rel="noopener">FOSSGIS</a>, &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors.
     </footer>
   </aside>
 
@@ -91,6 +98,7 @@
   <script src="data/tracks.js"></script>
   <script src="data/pcn.js"></script>
   <script src="data/amenities.js"></script>
+  <script src="data/signals.js"></script>
   <script src="graph.js"></script>
   <script src="app.js"></script>
 </body>

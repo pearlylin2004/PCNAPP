@@ -12,8 +12,15 @@ const LOOP_COLOURS = {
   'Western Adventure Loop': '#00897b',
 };
 const DEFAULT_COLOUR = '#607d8b';
-const SPEED_KMH = { bike: 15, foot: 5 };
-const SHORT_HOP = 40; // m: road gaps shorter than this are drawn straight, without directions
+// How each way of travelling is described and timed. Running speed comes from the pace setting.
+// `network` is which paths and road directions to use: runners go where walkers can.
+const MODES = {
+  bike: { verb: 'Cycle', icon: '🚲', kmh: 15, network: 'bike' },
+  foot: { verb: 'Walk', icon: '🚶', kmh: 5, network: 'foot' },
+  run: { verb: 'Run', icon: '🏃', network: 'foot' },
+};
+const SHORT_HOP = 40;   // m: road gaps shorter than this are drawn straight, without directions
+const SIGNAL_NEAR = 12; // m: traffic lights this close to the route are ones you'll pass through
 
 const $ = (id) => document.getElementById(id);
 
@@ -33,9 +40,14 @@ map.setMaxBounds([[1.15, 103.55], [1.50, 104.10]]);
 
 const formatDistance = (m) => (m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(1)} km`);
 
-function formatTime(metres, mode) {
-  const mins = Math.max(1, Math.round(metres / 1000 / SPEED_KMH[mode] * 60));
+function formatDuration(seconds) {
+  const mins = Math.max(1, Math.round(seconds / 60));
   return mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)} h ${mins % 60} min`;
+}
+
+function formatPace(secondsPerKm) {
+  const s = Math.round(secondsPerKm);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 const titleCase = (s) => s.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
@@ -379,7 +391,66 @@ $('swap').onclick = () => {
   setPlace('from', to);
 };
 
-$('mode').onchange = $('pref').onchange = () => planRoute();
+$('pref').onchange = () => planRoute();
+const showPaceField = () => { $('pace-field').hidden = $('mode').value !== 'run'; };
+$('mode').onchange = () => {
+  showPaceField();
+  planRoute();
+};
+showPaceField(); // the browser may have restored "Running" from last time
+
+// ---------- Timing: running pace and traffic light waits ----------
+// Remembered in this browser so you don't have to type your pace every time.
+
+const TIMING_KEY = 'pcnFinder.timing';
+const timing = { pace: 360, lightWait: 40 }; // seconds per km, seconds per traffic light
+try {
+  Object.assign(timing, JSON.parse(localStorage.getItem(TIMING_KEY)));
+} catch {
+  // nothing saved yet, or storage blocked: use the defaults
+}
+$('pace').value = formatPace(timing.pace);
+$('light-wait').value = timing.lightWait;
+
+// "6:30" or "6.5" (minutes per km) -> seconds per km, or null if it doesn't look like a pace.
+function parsePace(text) {
+  const m = text.trim().match(/^(\d{1,2})(?::([0-5]?\d))?$|^(\d{1,2}\.\d+)$/);
+  if (!m) return null;
+  const seconds = m[3] ? Number(m[3]) * 60 : Number(m[1]) * 60 + Number(m[2] || 0);
+  return seconds >= 120 && seconds <= 1200 ? seconds : null; // 2:00 to 20:00 per km
+}
+
+function updateTiming() {
+  const pace = parsePace($('pace').value);
+  const wait = Number($('light-wait').value);
+  $('timing-error').textContent = pace === null
+    ? 'Enter your pace as minutes:seconds per km, e.g. 6:30.'
+    : '';
+  if (pace !== null) timing.pace = pace;
+  if (Number.isFinite(wait) && wait >= 0 && wait <= 300) timing.lightWait = wait;
+  try {
+    localStorage.setItem(TIMING_KEY, JSON.stringify(timing));
+  } catch {
+    // storage blocked: settings last until the page is closed
+  }
+  if (currentLegs) renderSummary(currentLegs, $('mode').value);
+}
+$('pace').addEventListener('input', updateTiming);
+$('light-wait').addEventListener('input', updateTiming);
+
+// Seconds spent moving over `metres`.
+function movingSeconds(metres, mode) {
+  if (mode === 'run') return metres / 1000 * timing.pace;
+  return metres / 1000 / MODES[mode].kmh * 3600;
+}
+
+// Traffic lights the route passes through, as [lat, lng].
+function lightsOnRoute(legs) {
+  const line = legs.flatMap((l) => l.coords);
+  const bounds = L.latLngBounds(toLatLngs(line)).pad(0.02);
+  return window.SIGNALS.filter(([lat, lng]) => bounds.contains([lat, lng]) &&
+    PCNGraph.locateAlong(line, [lng, lat]).d <= SIGNAL_NEAR);
+}
 
 // ---------- Road directions for the gaps between PCNs ----------
 
@@ -407,7 +478,7 @@ async function fillRoadLeg(leg, mode) {
   leg.steps = [];
   leg.dist = straight;
   if (straight < SHORT_HOP) { leg.short = true; return; }
-  const profile = mode === 'foot' ? 'routed-foot' : 'routed-bike';
+  const profile = MODES[mode].network === 'foot' ? 'routed-foot' : 'routed-bike';
   const url = `https://routing.openstreetmap.de/${profile}/route/v1/driving/` +
     `${leg.from.join(',')};${leg.to.join(',')}?overview=full&geometries=geojson&steps=true`;
   try {
@@ -428,6 +499,7 @@ const routeLayer = L.layerGroup().addTo(map);
 const stopLayer = L.layerGroup().addTo(map);
 let planCount = 0;
 let currentLegs = null;
+let currentLights = [];
 
 async function planRoute() {
   const { from, to } = places;
@@ -440,16 +512,19 @@ async function planRoute() {
   $('stops').hidden = true;
 
   await new Promise((r) => setTimeout(r, 20)); // let the status message show before the heavy work
-  const legs = PCNGraph.route(toLngLat(from.latlng), toLngLat(to.latlng), Number($('pref').value), mode);
+  const network = MODES[mode].network;
+  const legs = PCNGraph.route(toLngLat(from.latlng), toLngLat(to.latlng), Number($('pref').value), network);
   await Promise.all(legs.filter((l) => l.kind === 'road').map((l) => fillRoadLeg(l, mode)));
   if (plan !== planCount) return; // the user changed something in the meantime
 
   $('route-status').textContent = legs.some((l) => l.approx)
     ? "Couldn't reach the road directions service, so some road sections are shown as straight lines."
     : '';
-  drawRoute(legs);
-  renderItinerary(legs, mode);
   currentLegs = legs;
+  currentLights = lightsOnRoute(legs);
+  drawRoute(legs);
+  renderSummary(legs, mode);
+  renderItinerary(legs, mode);
   renderStops(legs);
   $('clear-route').hidden = false;
 }
@@ -511,26 +586,44 @@ function drawRoute(legs) {
       L.polyline(latlngs, { color: '#1565c0', weight: 5, opacity: 0.9, dashArray: '2 9', interactive: false }).addTo(routeLayer);
     }
   }
+  for (const latlng of currentLights) {
+    L.marker(latlng, {
+      icon: L.divIcon({ className: 'light-icon', html: '🚦', iconSize: [18, 18] }),
+      title: 'Traffic light',
+      interactive: false,
+    }).addTo(routeLayer);
+  }
   Object.values(placeMarkers).forEach((m) => m && m.bringToFront());
   map.fitBounds(L.featureGroup(routeLayer.getLayers()).getBounds(), { padding: [40, 40] });
 }
 
-function renderItinerary(legs, mode) {
+// Total time = time moving at your speed or pace + waiting at each traffic light on the way.
+function renderSummary(legs, mode) {
   const total = legs.reduce((s, l) => s + l.dist, 0);
   const onPaths = legs.filter((l) => l.kind === 'path').reduce((s, l) => s + l.dist, 0);
   const pct = total ? Math.round(onPaths / total * 100) : 0;
+  const moving = movingSeconds(total, mode);
+  const lights = currentLights.length;
+  const waiting = lights * timing.lightWait;
 
   const summary = $('summary');
-  summary.appendChild(el('div', 'big', `${formatTime(total, mode)} · ${formatDistance(total)}`));
+  summary.innerHTML = '';
+  summary.appendChild(el('div', 'big', `${formatDuration(moving + waiting)} · ${formatDistance(total)}`));
+  const pace = mode === 'run' ? ` at ${formatPace(timing.pace)} /km` : '';
+  summary.appendChild(el('div', 'timing-line', lights
+    ? `${MODES[mode].icon} ${formatDuration(moving)}${pace} + 🚦 ~${formatDuration(waiting)} waiting at ${lights} traffic light${lights > 1 ? 's' : ''}`
+    : `${MODES[mode].icon} ${formatDuration(moving)}${pace} · no traffic lights 🎉`));
   summary.appendChild(el('small', null, `${pct}% on park connectors & park paths (${formatDistance(onPaths)})`));
   const bar = el('div', 'bar');
   const fill = el('span');
   fill.style.width = `${pct}%`;
   bar.appendChild(fill);
   summary.appendChild(bar);
+}
 
+function renderItinerary(legs, mode) {
   const list = $('itinerary');
-  const verb = mode === 'foot' ? 'Walk' : 'Cycle';
+  const { verb, icon } = MODES[mode];
   const addItem = (className, icon, text, sub, coords) => {
     const li = el('li', className);
     li.appendChild(el('span', 'icon', icon));
@@ -555,7 +648,7 @@ function renderItinerary(legs, mode) {
     if (leg.short) return; // just a few steps across to the next path
     const next = legs.slice(i + 1).find((l) => l.kind === 'path');
     const target = next ? (next.name ? `the start of ${next.name}` : 'the next park connector') : places.to.label;
-    const li = addItem('road', mode === 'foot' ? '🚶' : '🚲', `${verb} to ${target}`,
+    const li = addItem('road', icon, `${verb} to ${target}`,
       `${formatDistance(leg.dist)} on roads / paths${leg.approx ? ' (approximate)' : ''}`, leg.coords);
     if (leg.steps.length) {
       const details = el('details');
@@ -572,6 +665,7 @@ function renderItinerary(legs, mode) {
 $('clear-route').onclick = () => {
   planCount++;
   currentLegs = null;
+  currentLights = [];
   routeLayer.clearLayers();
   stopLayer.clearLayers();
   $('stops').hidden = true;
